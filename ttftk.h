@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 namespace ttftk
 {
@@ -8,6 +9,7 @@ namespace ttftk
 enum class Result
 {
     Success,
+    Incomplete,
     UnknownScalerType,
     UnknownCMAPTable,
     UnknownCMAPFormat,
@@ -73,11 +75,12 @@ struct Glyph
 };
 
 Result LoadTTF(uint8_t const* _memory, TrueTypeFile* _ttfFile);
-Result ReadGlyphData(TrueTypeFile const& _ttfFile, uint16_t _characterCode, Glyph* _glyph);
+Result ReadGlyphData(TrueTypeFile const& _ttfFile, uint32_t _characterCode, Glyph* _glyph);
+std::vector<uint32_t> ListCharCodes(TrueTypeFile const& _ttfFile);
 
 void const* ExtractOffsetSubtable(void const* _ptr, OffsetSubtable& _output);
 void const* ExtractTableDirectory(void const* _ptr, uint16_t _count, TableDirectoryEntry* _output);
-uint32_t ExtractGlyphIndex(void const* _ptr, uint16_t _format, uint16_t _charCode);
+uint32_t ExtractGlyphIndex(void const* _ptr, uint16_t _format, uint32_t _charCode);
 GlyphPoints ExtractGlyphPoints(uint8_t const* _loca,
                                uint8_t const* _glyf,
                                uint16_t _indexToLocFormat,
@@ -151,7 +154,14 @@ static inline float F2Dot14(int16_t _v) {
 #define CompareTag(t, s) (t[3]==s[0]) && (t[2]==s[1]) && (t[1]==s[2]) && (t[0]==s[3])
 #define CompareTagU32(t, s) CompareTag(((char const*)&t), s)
 
+} // namespace ttftk
+
 #ifdef TTFTK_IMPLEMENTATION
+
+#include <algorithm>
+
+namespace ttftk
+{
 
 Result LoadTTF(uint8_t const* _memory, TrueTypeFile* _ttfFile)
 {
@@ -221,7 +231,7 @@ Result LoadTTF(uint8_t const* _memory, TrueTypeFile* _ttfFile)
             uint32_t offset = ReadU32(ptr);
 
             if ((platformID == 0u
-                 && platformSpecificID != 14)
+                 && platformSpecificID < 7)
                 || (platformID == 3u
                     && (platformSpecificID == 10 || platformSpecificID == 1)))
             {
@@ -246,26 +256,24 @@ Result LoadTTF(uint8_t const* _memory, TrueTypeFile* _ttfFile)
     return Result::Success;
 }
 
-Result ReadGlyphData(TrueTypeFile const& _ttfFile, uint16_t _characterCode, Glyph* _glyph)
+Result ReadGlyphData(TrueTypeFile const& _ttfFile, uint32_t _characterCode, Glyph* _glyph)
 {
-    void const* ptr = nullptr;
-
     uint32_t glyphIndex = 0u;
     {
         uint8_t const* cmapBase = _ttfFile.memory + _ttfFile.required.cmap->offset;
-        ptr = (void const*)cmapBase;
+        void const* cmapptr = (void const*)cmapBase;
 
-        uint16_t cmapversion = ReadU16(ptr);
-        uint16_t tableCount = ReadU16(ptr);
+        uint16_t cmapversion = ReadU16(cmapptr);
+        uint16_t tableCount = ReadU16(cmapptr);
 
         for (uint16_t index = 0u; index < tableCount; ++index)
         {
-            uint16_t platformID = ReadU16(ptr);
-            uint16_t platformSpecificID = ReadU16(ptr);
-            uint32_t offset = ReadU32(ptr);
+            uint16_t platformID = ReadU16(cmapptr);
+            uint16_t platformSpecificID = ReadU16(cmapptr);
+            uint32_t offset = ReadU32(cmapptr);
 
             if ((platformID == 0u
-                 && platformSpecificID != 14)
+                 && platformSpecificID < 7)
                 || (platformID == 3u
                     && (platformSpecificID == 10
                         || platformSpecificID == 1)))
@@ -274,13 +282,13 @@ Result ReadGlyphData(TrueTypeFile const& _ttfFile, uint16_t _characterCode, Glyp
                 uint16_t unicodeVariant = platformSpecificID;
 
                 uint8_t const* cmapSubtableBase = cmapBase + unicodeTableOffset;
-                ptr = (void const*)cmapSubtableBase;
-                uint16_t format = ReadU16(ptr);
+                void const* subtableptr = (void const*)cmapSubtableBase;
+                uint16_t format = ReadU16(subtableptr);
 
                 if (format != 4 && format != 12)
                     continue;
 
-                glyphIndex = ExtractGlyphIndex(ptr, format, _characterCode);
+                glyphIndex = ExtractGlyphIndex(subtableptr, format, _characterCode);
                 if (glyphIndex != 0u)
                     break;
             }
@@ -290,6 +298,7 @@ Result ReadGlyphData(TrueTypeFile const& _ttfFile, uint16_t _characterCode, Glyp
     if (glyphIndex == 0u)
         return Result::GlyphMissing;
 
+    void const* ptr = nullptr;
     {
         uint8_t const* maxpBase = _ttfFile.memory + _ttfFile.required.maxp->offset;
         ptr = AdvancePointer<uint16_t>(maxpBase);
@@ -332,6 +341,7 @@ Result ReadGlyphData(TrueTypeFile const& _ttfFile, uint16_t _characterCode, Glyp
         _glyph->ymin = points.ymin;
         _glyph->ymax = points.ymax;
         std::vector<GlyphContour>& contours = _glyph->contours;
+        contours.clear();
 
         // Converting to a full quadratic data layout.
         // Should be a sequence of on/off/on/off.../on points, repeating the first point at the end.
@@ -388,6 +398,92 @@ Result ReadGlyphData(TrueTypeFile const& _ttfFile, uint16_t _characterCode, Glyp
     return Result::Success;
 }
 
+std::vector<uint32_t> ListCharCodes(TrueTypeFile const& _ttfFile)
+{
+    std::vector<uint32_t> output{};
+
+    uint8_t const* cmapBase = _ttfFile.memory + _ttfFile.required.cmap->offset;
+    void const* cmapptr = (void const*)cmapBase;
+
+    uint16_t cmapversion = ReadU16(cmapptr);
+    uint16_t tableCount = ReadU16(cmapptr);
+
+    for (uint16_t index = 0u; index < tableCount; ++index)
+    {
+        uint16_t platformID = ReadU16(cmapptr);
+        uint16_t platformSpecificID = ReadU16(cmapptr);
+        uint32_t offset = ReadU32(cmapptr);
+
+        if (!((platformID == 0u
+               && platformSpecificID < 7)
+              || (platformID == 3u
+                  && (platformSpecificID == 10
+                      || platformSpecificID == 1))))
+            continue;
+
+        uint32_t unicodeTableOffset = offset;
+        uint16_t unicodeVariant = platformSpecificID;
+
+        uint8_t const* cmapSubtableBase = cmapBase + unicodeTableOffset;
+        void const* subtableptr = (void const*)cmapSubtableBase;
+        uint16_t format = ReadU16(subtableptr);
+
+        if (format == 4)
+        {
+            uint16_t length = ReadU16(subtableptr);
+            uint16_t language = ReadU16(subtableptr);
+            uint16_t segCount = ReadU16(subtableptr) / 2;
+            uint16_t searchRange = ReadU16(subtableptr);
+            uint16_t entrySelector = ReadU16(subtableptr);
+            uint16_t rangeShift = ReadU16(subtableptr);
+            std::vector<uint16_t> endCode(segCount);
+            subtableptr = ReadU16(subtableptr, endCode.data(), endCode.size());
+            uint16_t reservedPad = ReadU16(subtableptr);
+            std::vector<uint16_t> startCode(segCount);
+            subtableptr = ReadU16(subtableptr, startCode.data(), startCode.size());
+
+            for (uint16_t segIndex = 0u; segIndex < segCount; ++segIndex)
+            {
+                for (uint16_t charCode = startCode[index];
+                     charCode <= endCode[index];
+                     ++charCode)
+                {
+                    auto it = std::lower_bound(output.begin(), output.end(),
+                                               (uint32_t)charCode);
+                    if (it == output.end() || *it != (uint32_t)charCode)
+                        output.insert(it, (uint32_t)charCode);
+                }
+            }
+        }
+
+        if (format == 12)
+        {
+            ReadU16(subtableptr); // reserved u16
+            uint32_t length = ReadU32(subtableptr);
+            uint32_t language = ReadU32(subtableptr);
+            uint32_t nGroups = ReadU32(subtableptr);
+
+            for (uint32_t groupIndex = 0u; groupIndex < nGroups; ++groupIndex)
+            {
+                uint32_t startCharCode = ReadU32(subtableptr);
+                uint32_t endCharCode = ReadU32(subtableptr);
+                uint32_t startGlyphCode = ReadU32(subtableptr);
+
+                for (uint32_t charCode = startCharCode;
+                     charCode <= endCharCode;
+                     ++charCode)
+                {
+                    auto it = std::lower_bound(output.begin(), output.end(), charCode);
+                    if (it == output.end() || *it != charCode)
+                        output.insert(it, charCode);
+                }
+            }
+        }
+    }
+
+    return output;
+}
+
 void const* ExtractOffsetSubtable(void const* _ptr, OffsetSubtable& _output)
 {
     void const* nextPtr = AdvancePointer<OffsetSubtable>(_ptr);
@@ -414,7 +510,7 @@ void const* ExtractTableDirectory(void const* _ptr, uint16_t _count, TableDirect
     return nextPtr;
 }
 
-uint32_t ExtractGlyphIndex(void const* _ptr, uint16_t _format, uint16_t _charCode)
+uint32_t ExtractGlyphIndex(void const* _ptr, uint16_t _format, uint32_t _charCode)
 {
     uint32_t glyphIndex = 0u;
 
@@ -440,9 +536,9 @@ uint32_t ExtractGlyphIndex(void const* _ptr, uint16_t _format, uint16_t _charCod
         //std::cout << std::dec << "seg count " << segCount << std::endl;
         for (uint16_t index = 0u; index < segCount; ++index)
         {
-            if (endCode[index] >= _charCode)
+            if ((uint32_t)endCode[index] >= _charCode)
             {
-                if (startCode[index] > _charCode)
+                if ((uint32_t)startCode[index] > _charCode)
                 {
                     //std::cout << "missing glyph" << std::endl;
                     break;
@@ -461,7 +557,7 @@ uint32_t ExtractGlyphIndex(void const* _ptr, uint16_t _format, uint16_t _charCod
                     glyphIndex = (uint32_t)(idDelta[index] + _charCode) & 0xffff;
                 else
                 {
-                    uint16_t offset = idRangeOffset[index]/2 + (_charCode - startCode[index]);
+                    uint32_t offset = idRangeOffset[index]/2 + (_charCode - startCode[index]);
                     void const* pIndex = glyphIndexArrayBase + offset + index - segCount;
                     glyphIndex = (uint32_t)ReadU16(pIndex);
                 }

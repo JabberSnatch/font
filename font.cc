@@ -28,8 +28,14 @@ void RenderGlyph(ttftk::Glyph const& _glyph);
 
 int main(int argc, char const ** argv)
 {
+    if (argc == 1)
+    {
+        std::cout << "Missing path to TrueType font file as first argument." << std::endl;
+        return 1;
+    }
+
     std::vector<uint8_t> memory = LoadFile(argv[1]);
-    uint16_t iCharCode = 0x00BE;//0x00BD;//0x007B; //0x0041 + 17;
+    uint32_t iCharCode = ~0u;
     if (argc > 2)
         iCharCode = strtol(argv[2], nullptr, 16);
 
@@ -41,13 +47,26 @@ int main(int argc, char const ** argv)
     }
 
     ttftk::Glyph glyph{};
-    if (ttftk::ReadGlyphData(ttfFile, iCharCode, &glyph) != ttftk::Result::Success)
+    if (iCharCode != ~0u)
     {
-        std::cout << "error reading glyph data" << std::endl;
-        return 1;
+        if (ttftk::ReadGlyphData(ttfFile, iCharCode, &glyph) != ttftk::Result::Success)
+        {
+            std::cout << "error reading glyph data" << std::endl;
+            return 1;
+        }
+        RenderGlyph(glyph);
     }
-
-    RenderGlyph(glyph);
+    else
+    {
+        std::vector<uint32_t> charList = ttftk::ListCharCodes(ttfFile);
+        for (uint32_t charCode : charList)
+        {
+            std::cout << "================================================================================" << std::endl;
+            std::cout << std::hex << charCode << std::endl;
+            ttftk::ReadGlyphData(ttfFile, charCode, &glyph);
+            RenderGlyph(glyph);
+        }
+    }
 
     return 0;
 }
