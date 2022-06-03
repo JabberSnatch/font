@@ -24,7 +24,7 @@ std::vector<uint8_t> LoadFile(char const* _path)
     return memory;
 }
 
-void RenderGlyph(ttftk::Glyph const& _glyph);
+void RenderGlyph(ttftk::TrueTypeFile const& _ttfFile, ttftk::Glyph const& _glyph);
 
 int main(int argc, char const ** argv)
 {
@@ -54,7 +54,7 @@ int main(int argc, char const ** argv)
             std::cout << "error reading glyph data" << std::endl;
             return 1;
         }
-        RenderGlyph(glyph);
+        RenderGlyph(ttfFile, glyph);
     }
     else
     {
@@ -64,21 +64,37 @@ int main(int argc, char const ** argv)
             std::cout << "================================================================================" << std::endl;
             std::cout << std::hex << charCode << std::endl;
             ttftk::ReadGlyphData(ttfFile, charCode, &glyph);
-            RenderGlyph(glyph);
+            RenderGlyph(ttfFile, glyph);
         }
     }
 
     return 0;
 }
 
-void RenderGlyph(ttftk::Glyph const& _glyph)
+void RenderGlyph(ttftk::TrueTypeFile const& _ttfFile, ttftk::Glyph const& _glyph)
 {
     int maxX = 80;
     int maxY = 40;
 
+#if 0
+    float sourceMaxX = (float)_glyph.xmax;
+    float sourceMinX = (float)_glyph.xmin;
+    float sourceMaxY = (float)_glyph.ymax;
+    float sourceMinY = (float)_glyph.ymin;
+#elif 0
+    float sourceMaxX = (float)_ttfFile.emsize;
+    float sourceMinX = (float)0;
+    float sourceMaxY = (float)_ttfFile.emsize;
+    float sourceMinY = (float)0;
+#else
+    float sourceMaxX = (float)_ttfFile.xmax;
+    float sourceMinX = (float)_ttfFile.xmin;
+    float sourceMaxY = (float)_ttfFile.ymax;
+    float sourceMinY = (float)_ttfFile.ymin;
+#endif
+
     float yaspect = 1.f;
-    float xaspect = ((float)_glyph.xmax - (float)_glyph.xmin)
-        / ((float)_glyph.ymax - (float)_glyph.ymin);
+    float xaspect = (sourceMaxX - sourceMinX) / (sourceMaxY - sourceMinY);
     if (xaspect > 1.f)
     {
         yaspect = 1.f / xaspect;
@@ -92,10 +108,8 @@ void RenderGlyph(ttftk::Glyph const& _glyph)
             float u = ((float)x / (float)maxX) / xaspect;
             float v = ((float)(maxY-y) / (float)maxY) / yaspect;
 
-            int16_t sampleX = (int16_t)std::round(
-                u * ((float)_glyph.xmax - (float)_glyph.xmin) + (float)_glyph.xmin);
-            int16_t sampleY = (int16_t)std::round(
-                v * ((float)_glyph.ymax - (float)_glyph.ymin) + (float)_glyph.ymin);
+            int16_t sampleX = (int16_t)std::round(u * (sourceMaxX - sourceMinX) + sourceMinX);
+            int16_t sampleY = (int16_t)std::round(v * (sourceMaxY - sourceMinY) + sourceMinY);
 
             int32_t windingNumber = 0;
             for (ttftk::GlyphContour const& contour : _glyph.contours)
@@ -163,10 +177,18 @@ void RenderGlyph(ttftk::Glyph const& _glyph)
                 }
             }
 
+#if 1
             if (windingNumber > 0)
                 std::cout << "X";
+#if 0
+            else if (windingNumber < 0)
+                std::cout << -windingNumber;
+#endif
             else
                 std::cout << " ";
+#else
+            std::cout << windingNumber;
+#endif
         }
         std::cout << std::endl;
     }

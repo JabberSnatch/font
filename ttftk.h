@@ -50,6 +50,8 @@ struct TrueTypeFile
     RequiredTables required;
     OptionalTables optional;
     std::vector<TableDirectoryEntry> tableDirectory;
+    int16_t xmin, ymin, xmax, ymax;
+    int16_t emsize;
 };
 
 struct GlyphPoints
@@ -252,6 +254,18 @@ Result LoadTTF(uint8_t const* _memory, TrueTypeFile* _ttfFile)
             return Result::UnknownCMAPFormat;
     }
 
+    {
+        uint8_t const* headBase = ttfFile.memory + ttfFile.required.head->offset;
+        ptr = headBase;
+        ptr = AdvancePointer<uint8_t>(ptr, 18);
+        ttfFile.emsize = ReadU16(ptr);
+        ptr = AdvancePointer<uint8_t>(ptr, 16);
+        ttfFile.xmin = ReadS16(ptr);
+        ttfFile.ymin = ReadS16(ptr);
+        ttfFile.xmax = ReadS16(ptr);
+        ttfFile.ymax = ReadS16(ptr);
+    }
+
     std::swap(ttfFile, *_ttfFile);
     return Result::Success;
 }
@@ -359,8 +373,10 @@ Result ReadGlyphData(TrueTypeFile const& _ttfFile, uint32_t _characterCode, Glyp
 
             uint16_t endPoint = points.endPoints[contourIndex] + 1;
 
-            uint8_t lastFlags = 0u;
-            for (uint16_t pointIndex = beginPoint; pointIndex < endPoint; ++pointIndex)
+            uint8_t lastFlags = points.contourFlags[beginPoint];
+            contour.x.push_back(points.contourX[beginPoint]);
+            contour.y.push_back(points.contourY[beginPoint]);
+            for (uint16_t pointIndex = beginPoint+1; pointIndex < endPoint; ++pointIndex)
             {
                 uint8_t flags = points.contourFlags[pointIndex];
                 if ((lastFlags ^ flags) & 1)
