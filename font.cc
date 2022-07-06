@@ -8,6 +8,9 @@
 #define TTFTK_IMPLEMENTATION
 #include "ttftk.h"
 
+#define BMPTK_IMPLEMENTATION
+#include "bmptk/bmptk.h"
+
 std::vector<uint8_t> LoadFile(char const* _path)
 {
     std::ifstream source_file(_path, std::ios_base::binary);
@@ -24,7 +27,16 @@ std::vector<uint8_t> LoadFile(char const* _path)
     return memory;
 }
 
+void WriteFile(char const* _path, uint8_t const* _base, uint32_t _size)
+{
+    std::ofstream dest_file(_path, std::ios_base::binary);
+    dest_file.write((char const*)_base, (std::streamsize)_size);
+}
+
 void RenderGlyph(ttftk::TrueTypeFile const& _ttfFile, ttftk::Glyph const& _glyph);
+void RenderGlyph(ttftk::TrueTypeFile const& _ttfFile, ttftk::Glyph const& _glyph,
+                 bmptk::BitmapV1Header const& _header, bmptk::PixelValue *_pixels,
+                 uint32_t xres, uint32_t yres, uint32_t xOffset, uint32_t yOffset);
 
 int main(int argc, char const ** argv)
 {
@@ -36,8 +48,16 @@ int main(int argc, char const ** argv)
 
     std::vector<uint8_t> memory = LoadFile(argv[1]);
     uint32_t iCharCode = ~0u;
-    if (argc > 2)
+    uint32_t glyphCountX = 10;
+    uint32_t glyphCountY = 10;
+
+    if (argc == 3)
         iCharCode = strtol(argv[2], nullptr, 16);
+    else if (argc > 3)
+    {
+        glyphCountX = strtol(argv[2], nullptr, 10);
+        glyphCountY = strtol(argv[3], nullptr, 10);
+    }
 
     ttftk::TrueTypeFile ttfFile{};
     if (ttftk::LoadTTF(memory.data(), &ttfFile) != ttftk::Result::Success)
@@ -56,7 +76,7 @@ int main(int argc, char const ** argv)
         }
         RenderGlyph(ttfFile, glyph);
     }
-    else
+    else if (argc == 2)
     {
         std::vector<uint32_t> charList = ttftk::ListCharCodes(ttfFile);
         for (uint32_t charCode : charList)
@@ -66,6 +86,42 @@ int main(int argc, char const ** argv)
             ttftk::ReadGlyphData(ttfFile, charCode, &glyph);
             RenderGlyph(ttfFile, glyph);
         }
+    }
+    else
+    {
+        uint32_t boxsize = 75;
+
+        bmptk::BitmapV1Header header{};
+        header.width = boxsize * glyphCountX;
+        header.height = -boxsize * glyphCountY;
+
+        std::vector<bmptk::PixelValue> pixels(boxsize*boxsize * glyphCountX * glyphCountY);
+        std::memset(pixels.data(), 0, sizeof(bmptk::PixelValue)*pixels.size());
+        std::vector<uint32_t> charList = ttftk::ListCharCodes(ttfFile);
+
+        uint32_t glyphX = 0;
+        uint32_t glyphY = 0;
+        for (uint32_t charCode : charList)
+        {
+            ttftk::ReadGlyphData(ttfFile, charCode, &glyph);
+            RenderGlyph(ttfFile, glyph, header, pixels.data(),
+                        boxsize, boxsize, glyphX * boxsize, glyphY * boxsize);
+            ++glyphX;
+            if (glyphX >= glyphCountX)
+            {
+                glyphX = 0;
+                ++glyphY;
+                if (glyphY >= glyphCountY)
+                    break;
+            }
+        }
+
+        std::vector<uint8_t> memory(bmptk::AllocSize(&header));
+        bmptk::WriteBMP(&header, pixels.data(), memory.data());
+        char const* outpath = "testfile.bmp";
+        if (argc == 5)
+            outpath = argv[4];
+        WriteFile(outpath, memory.data(), memory.size());
     }
 
     return 0;
@@ -111,71 +167,7 @@ void RenderGlyph(ttftk::TrueTypeFile const& _ttfFile, ttftk::Glyph const& _glyph
             int16_t sampleX = (int16_t)std::round(u * (sourceMaxX - sourceMinX) + sourceMinX);
             int16_t sampleY = (int16_t)std::round(v * (sourceMaxY - sourceMinY) + sourceMinY);
 
-            int32_t windingNumber = 0;
-            for (ttftk::GlyphContour const& contour : _glyph.contours)
-            {
-                for (size_t point = 0u; point < contour.x.size()-2; point+=2)
-                {
-                    int16_t pointX[3] {
-                        (int16_t)(contour.x[point] - sampleX),
-                        (int16_t)(contour.x[point + 1] - sampleX),
-                        (int16_t)(contour.x[point + 2] - sampleX)
-                    };
-                    int16_t pointY[3] {
-                        (int16_t)(contour.y[point] - sampleY),
-                        (int16_t)(contour.y[point + 1] - sampleY),
-                        (int16_t)(contour.y[point + 2] - sampleY)
-                    };
-
-                    uint8_t key = ((pointY[0] > 0) ? 2 : 0)
-                        | ((pointY[1] > 0) ? 4 : 0)
-                        | ((pointY[2] > 0) ? 8 : 0);
-
-                    static constexpr uint16_t kLUT = 0x2E74u;
-
-                    uint16_t intType = kLUT >> key;
-                    if (intType & 3)
-                    {
-                        float a = (float)pointY[0] - 2.f * (float)pointY[1] + (float)pointY[2];
-                        float b = (float)pointY[0] - (float)pointY[1];
-                        float c = (float)pointY[0];
-
-                        float cx0 = -1.f;
-                        float cx1 = -1.f;
-                        if (std::abs(a) < 0.001f)
-                        {
-                            float t = c / (2.f * b);
-                            float cx = (pointX[0] - 2.f*pointX[1] + pointX[2])*t*t
-                                - 2.f*(pointX[0] - pointX[1])*t
-                                + pointX[0];
-                            if (intType & 1)
-                                cx0 = cx;
-                            if (intType & 2)
-                                cx1 = cx;
-                        }
-                        else
-                        {
-                            if (intType & 1)
-                            {
-                                float t0 = (b - std::sqrt(b*b - a*c)) / a;
-                                cx0 = (pointX[0] - 2.f*pointX[1] + pointX[2])*t0*t0
-                                    - 2.f*(pointX[0] - pointX[1])*t0
-                                    + pointX[0];
-                            }
-                            if (intType & 2)
-                            {
-                                float t1 = (b + std::sqrt(b*b - a*c)) / a;
-                                cx1 = (pointX[0] - 2.f*pointX[1] + pointX[2])*t1*t1
-                                    - 2.f*(pointX[0] - pointX[1])*t1
-                                    + pointX[0];
-                            }
-                        }
-
-                        if (cx0 >= 0.f) ++windingNumber;
-                        if (cx1 >= 0.f) --windingNumber;
-                    }
-                }
-            }
+            int32_t windingNumber = ttftk::EvalWindingNumber(&_glyph, sampleX, sampleY);
 
 #if 1
             if (windingNumber > 0)
@@ -191,5 +183,46 @@ void RenderGlyph(ttftk::TrueTypeFile const& _ttfFile, ttftk::Glyph const& _glyph
 #endif
         }
         std::cout << std::endl;
+    }
+}
+
+void RenderGlyph(ttftk::TrueTypeFile const& _ttfFile, ttftk::Glyph const& _glyph,
+                 bmptk::BitmapV1Header const& _header, bmptk::PixelValue *_pixels,
+                 uint32_t xres, uint32_t yres, uint32_t xOffset, uint32_t yOffset)
+{
+    int maxX = (int)xres;
+    int maxY = (int)yres;
+
+    float sourceMaxX = (float)_ttfFile.xmax;
+    float sourceMinX = (float)_ttfFile.xmin;
+    float sourceMaxY = (float)_ttfFile.ymax;
+    float sourceMinY = (float)_ttfFile.ymin;
+
+    float yaspect = 1.f;
+    float xaspect = (sourceMaxX - sourceMinX) / (sourceMaxY - sourceMinY);
+    if (xaspect > 1.f)
+    {
+        yaspect = 1.f / xaspect;
+        xaspect = 1.f;
+    }
+
+    for (int y = 0; y < maxY; ++y)
+    {
+        for (int x = 0; x < maxX; ++x)
+        {
+            float u = ((float)x / (float)maxX) / xaspect;
+            float v = ((float)(maxY-y) / (float)maxY) / yaspect;
+
+            int16_t sampleX = (int16_t)std::round(u * (sourceMaxX - sourceMinX) + sourceMinX);
+            int16_t sampleY = (int16_t)std::round(v * (sourceMaxY - sourceMinY) + sourceMinY);
+
+            int32_t windingNumber = ttftk::EvalWindingNumber(&_glyph, sampleX, sampleY);
+
+            bmptk::PixelValue* pixel = _pixels + ((xOffset + x) + (yOffset + y)*_header.width);
+            if (windingNumber > 0)
+                pixel->d[0] = pixel->d[1] = pixel->d[2] = 0;
+            else
+                pixel->d[0] = pixel->d[1] = pixel->d[2] = 255;
+        }
     }
 }
