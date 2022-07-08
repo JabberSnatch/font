@@ -216,13 +216,21 @@ void RenderGlyph(ttftk::TrueTypeFile const& _ttfFile, ttftk::Glyph const& _glyph
             int16_t sampleX = (int16_t)std::round(u * (sourceMaxX - sourceMinX) + sourceMinX);
             int16_t sampleY = (int16_t)std::round(v * (sourceMaxY - sourceMinY) + sourceMinY);
 
-            int32_t windingNumber = ttftk::EvalWindingNumber(&_glyph, sampleX, sampleY);
-
             bmptk::PixelValue* pixel = _pixels + ((xOffset + x) + (yOffset + y)*_header.width);
+#if 0
+            int32_t windingNumber = ttftk::EvalWindingNumber(&_glyph, sampleX, sampleY);
             if (windingNumber > 0)
                 pixel->d[0] = pixel->d[1] = pixel->d[2] = 0;
             else
                 pixel->d[0] = pixel->d[1] = pixel->d[2] = 255;
+#else
+            float distance = std::abs(ttftk::EvalDistance(&_glyph, sampleX, sampleY));
+            if (distance < 1.f)
+                pixel->d[0] = pixel->d[1] = pixel->d[2] = 0;
+            else
+                pixel->d[0] = pixel->d[1] = pixel->d[2] =
+                    (uint8_t)(std::min(distance * 0.1f, 1.f) * 255.f);
+#endif
         }
     }
 }

@@ -81,14 +81,7 @@ Result ReadGlyphData(TrueTypeFile const& _ttfFile, uint32_t _characterCode, Glyp
 std::vector<uint32_t> ListCharCodes(TrueTypeFile const& _ttfFile);
 
 int32_t EvalWindingNumber(Glyph const* _glyph, int16_t _sampleX, int16_t _sampleY);
-
-void const* ExtractOffsetSubtable(void const* _ptr, OffsetSubtable& _output);
-void const* ExtractTableDirectory(void const* _ptr, uint16_t _count, TableDirectoryEntry* _output);
-uint32_t ExtractGlyphIndex(void const* _ptr, uint16_t _format, uint32_t _charCode);
-GlyphPoints ExtractGlyphPoints(uint8_t const* _loca,
-                               uint8_t const* _glyf,
-                               uint16_t _indexToLocFormat,
-                               uint32_t _glyphIndex);
+float EvalDistance(Glyph const* _glyph, int16_t _sampleX, int16_t _sampleY);
 
 template <typename T>
 static inline void const* AdvancePointer(void const* _source, size_t _count = 1)
@@ -163,9 +156,21 @@ static inline float F2Dot14(int16_t _v) {
 #ifdef TTFTK_IMPLEMENTATION
 
 #include <algorithm>
+#include <limits>
 
 namespace ttftk
 {
+
+void const* ExtractOffsetSubtable(void const* _ptr, OffsetSubtable& _output);
+void const* ExtractTableDirectory(void const* _ptr, uint16_t _count, TableDirectoryEntry* _output);
+uint32_t ExtractGlyphIndex(void const* _ptr, uint16_t _format, uint32_t _charCode);
+GlyphPoints ExtractGlyphPoints(uint8_t const* _loca,
+                               uint8_t const* _glyf,
+                               uint16_t _indexToLocFormat,
+                               uint32_t _glyphIndex);
+
+uint16_t IntersectSpline(int16_t const _pointTraceAxis[3], int16_t const _pointCrossAxis[3],
+                         float* _c0, float* _c1);
 
 Result LoadTTF(uint8_t const* _memory, TrueTypeFile* _ttfFile)
 {
@@ -520,57 +525,54 @@ int32_t EvalWindingNumber(Glyph const* _glyph, int16_t _sampleX, int16_t _sample
                 (int16_t)(contour.y[point + 2] - _sampleY)
             };
 
-            uint8_t key = ((pointY[0] > 0) ? 2 : 0)
-                | ((pointY[1] > 0) ? 4 : 0)
-                | ((pointY[2] > 0) ? 8 : 0);
-
-            static constexpr uint16_t kLUT = 0x2E74u;
-
-            uint16_t intType = kLUT >> key;
-            if (intType & 3)
-            {
-                float a = (float)pointY[0] - 2.f * (float)pointY[1] + (float)pointY[2];
-                float b = (float)pointY[0] - (float)pointY[1];
-                float c = (float)pointY[0];
-
-                float cx0 = -1.f;
-                float cx1 = -1.f;
-                if (std::abs(a) < 0.001f)
-                {
-                    float t = c / (2.f * b);
-                    float cx = (pointX[0] - 2.f*pointX[1] + pointX[2])*t*t
-                        - 2.f*(pointX[0] - pointX[1])*t
-                        + pointX[0];
-                    if (intType & 1)
-                        cx0 = cx;
-                    if (intType & 2)
-                        cx1 = cx;
-                }
-                else
-                {
-                    if (intType & 1)
-                    {
-                        float t0 = (b - std::sqrt(b*b - a*c)) / a;
-                        cx0 = (pointX[0] - 2.f*pointX[1] + pointX[2])*t0*t0
-                            - 2.f*(pointX[0] - pointX[1])*t0
-                            + pointX[0];
-                    }
-                    if (intType & 2)
-                    {
-                        float t1 = (b + std::sqrt(b*b - a*c)) / a;
-                        cx1 = (pointX[0] - 2.f*pointX[1] + pointX[2])*t1*t1
-                            - 2.f*(pointX[0] - pointX[1])*t1
-                            + pointX[0];
-                    }
-                }
-
-                if (cx0 >= 0.f) ++windingNumber;
-                if (cx1 >= 0.f) --windingNumber;
-            }
+            float cx0 = -1.f;
+            float cx1 = -1.f;
+            uint16_t hit = IntersectSpline(pointX, pointY, &cx0, &cx1);
+            if (hit & 1 && cx0 >= 0.f) ++windingNumber;
+            if (hit & 2 && cx1 >= 0.f) --windingNumber;
         }
     }
 
     return windingNumber;
+}
+
+float EvalDistance(Glyph const* _glyph, int16_t _sampleX, int16_t _sampleY)
+{
+    float distance = std::numeric_limits<float>::infinity();
+    int32_t windingNumber = 0;
+
+    for (ttftk::GlyphContour const& contour : _glyph->contours)
+    {
+        for (size_t point = 0u; point < contour.x.size()-2; point+=2)
+        {
+            int16_t const pointX[3] {
+                (int16_t)(contour.x[point] - _sampleX),
+                (int16_t)(contour.x[point + 1] - _sampleX),
+                (int16_t)(contour.x[point + 2] - _sampleX)
+            };
+            int16_t const pointY[3] {
+                (int16_t)(contour.y[point] - _sampleY),
+                (int16_t)(contour.y[point + 1] - _sampleY),
+                (int16_t)(contour.y[point + 2] - _sampleY)
+            };
+
+            float cx0 = -std::numeric_limits<float>::infinity();
+            float cx1 = -std::numeric_limits<float>::infinity();
+            uint16_t const xhit = IntersectSpline(pointX, pointY, &cx0, &cx1);
+            if (xhit & 1) distance = std::min(distance, std::abs(cx0));
+            if (xhit & 2) distance = std::min(distance, std::abs(cx1));
+            if (cx0 >= 0.f) ++windingNumber;
+            if (cx1 >= 0.f) --windingNumber;
+
+            float cy0 = std::numeric_limits<float>::infinity();
+            float cy1 = std::numeric_limits<float>::infinity();
+            uint16_t const yhit = IntersectSpline(pointY, pointX, &cy0, &cy1);
+            if (yhit & 1) distance = std::min(distance, std::abs(cy0));
+            if (yhit & 2) distance = std::min(distance, std::abs(cy1));
+        }
+    }
+
+    return distance * ((windingNumber > 0) ? -1.f : 1.f);
 }
 
 void const* ExtractOffsetSubtable(void const* _ptr, OffsetSubtable& _output)
@@ -880,6 +882,61 @@ GlyphPoints ExtractGlyphPoints(uint8_t const* _loca,
     }
 
     return output;
+}
+
+uint16_t IntersectSpline(int16_t const _pointTraceAxis[3], int16_t const _pointCrossAxis[3],
+                         float* _x0, float* _x1)
+{
+    static constexpr uint16_t kLUT = 0x2E74u;
+
+    uint8_t const key = (((_pointCrossAxis[0] > 0) ? 2 : 0)
+                         | ((_pointCrossAxis[1] > 0) ? 4 : 0)
+                         | ((_pointCrossAxis[2] > 0) ? 8 : 0));
+
+    uint16_t const intType = kLUT >> key;
+    if (intType & 3)
+    {
+        float const a0 = (float)(_pointCrossAxis[0]
+                                 - 2*_pointCrossAxis[1]
+                                 + _pointCrossAxis[2]);
+        float const b0 = (float)(_pointCrossAxis[0]
+                                 - _pointCrossAxis[1]);
+        float const c0 = (float)_pointCrossAxis[0];
+
+        float const a1 = (float)(_pointTraceAxis[0]
+                                 - 2*_pointTraceAxis[1]
+                                 + _pointTraceAxis[2]);
+        float const b1 = (float)(_pointTraceAxis[0]
+                                 - _pointTraceAxis[1]);
+        float const c1 = (float)_pointTraceAxis[0];
+
+        if (std::abs(a0) < 0.001f)
+        {
+            float const t = c0 / (2.f * b0);
+            float const cx = a1*t*t - b1*2.f*t + c1;
+
+            if (intType & 1)
+                *_x0 = cx;
+            if (intType & 2)
+                *_x1 = cx;
+        }
+        else
+        {
+            if (intType & 1)
+            {
+                float const t0 = (b0 - std::sqrt(b0*b0 - a0*c0)) / a0;
+                *_x0 = a1*t0*t0 - b1*2.f*t0 + c1;
+            }
+
+            if (intType & 2)
+            {
+                float const t1 = (b0 + std::sqrt(b0*b0 - a0*c0)) / a0;
+                *_x1 = a1*t1*t1 - b1*2.f*t1 + c1;
+            }
+        }
+    }
+
+    return intType;
 }
 
 #endif
