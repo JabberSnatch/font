@@ -393,8 +393,15 @@ Result ReadGlyphData(TrueTypeFile const& _ttfFile, uint32_t _characterCode, Glyp
                 }
                 else
                 {
-                    int16_t avgX = (points.contourX[pointIndex-1] + points.contourX[pointIndex]) / 2;
-                    int16_t avgY = (points.contourY[pointIndex-1] + points.contourY[pointIndex]) / 2;
+                    // Insert a point on the line between pointIndex-1 and pointIndex.
+                    // Due to sdBezier's instability when all three points are aligned
+                    // and the second point is right in th middle (kk == inf, see impl),
+                    // we place the third point a quarter of the way there.
+                    int16_t const avgX = points.contourX[pointIndex-1] +
+                        (points.contourX[pointIndex] - points.contourX[pointIndex-1]) / 4;
+                    int16_t const avgY = points.contourY[pointIndex-1] +
+                        (points.contourY[pointIndex] - points.contourY[pointIndex-1]) / 4;
+
                     contour.x.push_back(avgX);
                     contour.y.push_back(avgY);
                     contour.x.push_back(points.contourX[pointIndex]);
@@ -406,8 +413,11 @@ Result ReadGlyphData(TrueTypeFile const& _ttfFile, uint32_t _characterCode, Glyp
 
             if (!((points.contourFlags[endPoint-1] ^ points.contourFlags[beginPoint]) & 1))
             {
-                int16_t avgX = (points.contourX[endPoint-1] + points.contourX[beginPoint]) / 2;
-                int16_t avgY = (points.contourY[endPoint-1] + points.contourY[beginPoint]) / 2;
+                int16_t const avgX = points.contourX[endPoint-1] +
+                    (points.contourX[beginPoint] - points.contourX[endPoint-1]) / 4;
+                int16_t const avgY = points.contourY[endPoint-1] +
+                    (points.contourY[beginPoint] - points.contourY[endPoint-1]) / 4;
+
                 contour.x.push_back(avgX);
                 contour.y.push_back(avgY);
             }
@@ -536,6 +546,73 @@ int32_t EvalWindingNumber(Glyph const* _glyph, int16_t _sampleX, int16_t _sample
     return windingNumber;
 }
 
+float sdBezier(int16_t const pointX[3], int16_t const pointY[3])
+{
+    float res = 0.f;
+
+    int32_t const a[2] = {
+        pointX[1]-pointX[0],
+        pointY[1]-pointY[0]
+    };
+    int32_t const b[2] = {
+        pointX[0] - 2*pointX[1] + pointX[2],
+        pointY[0] - 2*pointY[1] + pointY[2]
+    };
+    int32_t const c[2] = { a[0]*2, a[1]*2 };
+    int32_t const d[2] = { pointX[0], pointY[0] };
+
+    float const kk = 1.f / (float)(b[0]*b[0]+b[1]*b[1]);
+    float const kx = kk * (float)(a[0]*b[0]+a[1]*b[1]);
+    float const ky = kk * (float)(2*(a[0]*a[0]+a[1]*a[1])+d[0]*b[0]+d[1]*b[1]) / 3.f;
+    float const kz = kk * (float)(d[0]*a[0]+d[1]*a[1]);
+
+    float const p = ky - kx*kx;
+    float const p3 = p*p*p;
+    float const q = kx*(2.f*kx*kx-3.f*ky) + kz;
+    float h = q*q + 4.f*p3;
+
+    if (h >= 0.f)
+    {
+        h = std::sqrt(h);
+        float const x[2] = { (h-q) * 0.5f, (-h-q) * 0.5f };
+        float const uv[2] = {
+            ((x[0] >= 0.f) ? 1.f : -1.f) * std::pow(std::abs(x[0]), 1.f/3.f),
+            ((x[1] >= 0.f) ? 1.f : -1.f) * std::pow(std::abs(x[1]), 1.f/3.f),
+        };
+        float const t = std::min(std::max(uv[0]+uv[1]-kx, 0.f), 1.f);
+        float const r[2] = {
+            d[0] + (c[0] + b[0]*t)*t,
+            d[1] + (c[1] + b[1]*t)*t,
+        };
+        res = r[0]*r[0]+r[1]*r[1];
+    }
+
+    else
+    {
+        float const z = std::sqrt(-p);
+        float const v = std::acos(q/(p*z*2.f))/3.f;
+        float const m = std::cos(v);
+        float const n = std::sin(v)*1.732050808f;
+        float const t[2] = {
+            std::min(std::max((m+m) * z-kx, 0.f), 1.f),
+            std::min(std::max((-n-m) * z-kx, 0.f), 1.f),
+            //std::min(std::max((n-m) * z-kx, 0.f), 1.f),
+        };
+        float const r0[2] = {
+            d[0] + (c[0]+b[0]*t[0])*t[0],
+            d[1] + (c[1]+b[1]*t[0])*t[0],
+        };
+        float const r1[2] = {
+            d[0] + (c[0]+b[0]*t[1])*t[1],
+            d[1] + (c[1]+b[1]*t[1])*t[1],
+        };
+        res = std::min(r0[0]*r0[0]+r0[1]*r0[1],
+                       r1[0]*r1[0]+r1[1]*r1[1]);
+    }
+
+    return std::sqrt(res);
+}
+
 float EvalDistance(Glyph const* _glyph, int16_t _sampleX, int16_t _sampleY)
 {
     float distance = std::numeric_limits<float>::infinity();
@@ -556,19 +633,7 @@ float EvalDistance(Glyph const* _glyph, int16_t _sampleX, int16_t _sampleY)
                 (int16_t)(contour.y[point + 2] - _sampleY)
             };
 
-            float cx0 = -std::numeric_limits<float>::infinity();
-            float cx1 = -std::numeric_limits<float>::infinity();
-            uint16_t const xhit = IntersectSpline(pointX, pointY, &cx0, &cx1);
-            if (xhit & 1) distance = std::min(distance, std::abs(cx0));
-            if (xhit & 2) distance = std::min(distance, std::abs(cx1));
-            if (cx0 >= 0.f) ++windingNumber;
-            if (cx1 >= 0.f) --windingNumber;
-
-            float cy0 = std::numeric_limits<float>::infinity();
-            float cy1 = std::numeric_limits<float>::infinity();
-            uint16_t const yhit = IntersectSpline(pointY, pointX, &cy0, &cy1);
-            if (yhit & 1) distance = std::min(distance, std::abs(cy0));
-            if (yhit & 2) distance = std::min(distance, std::abs(cy1));
+            distance = std::min(distance, sdBezier(pointX, pointY));
         }
     }
 

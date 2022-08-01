@@ -89,6 +89,10 @@ int main(int argc, char const ** argv)
     }
     else
     {
+        uint32_t charListOffset = 0u;
+        if (argc > 5)
+            charListOffset = std::strtol(argv[5], nullptr, 10);
+
         uint32_t boxsize = 75;
 
         bmptk::BitmapV1Header header{};
@@ -101,8 +105,9 @@ int main(int argc, char const ** argv)
 
         uint32_t glyphX = 0;
         uint32_t glyphY = 0;
-        for (uint32_t charCode : charList)
+        for (std::size_t index = 0u; index < charList.size()-charListOffset; ++index)
         {
+            uint32_t charCode = charList[index + charListOffset];
             ttftk::ReadGlyphData(ttfFile, charCode, &glyph);
             RenderGlyph(ttfFile, glyph, header, pixels.data(),
                         boxsize, boxsize, glyphX * boxsize, glyphY * boxsize);
@@ -119,7 +124,7 @@ int main(int argc, char const ** argv)
         std::vector<uint8_t> memory(bmptk::AllocSize(&header));
         bmptk::WriteBMP(&header, pixels.data(), memory.data());
         char const* outpath = "testfile.bmp";
-        if (argc == 5)
+        if (argc > 4)
             outpath = argv[4];
         WriteFile(outpath, memory.data(), memory.size());
     }
@@ -217,20 +222,18 @@ void RenderGlyph(ttftk::TrueTypeFile const& _ttfFile, ttftk::Glyph const& _glyph
             int16_t sampleY = (int16_t)std::round(v * (sourceMaxY - sourceMinY) + sourceMinY);
 
             bmptk::PixelValue* pixel = _pixels + ((xOffset + x) + (yOffset + y)*_header.width);
-#if 0
+
             int32_t windingNumber = ttftk::EvalWindingNumber(&_glyph, sampleX, sampleY);
             if (windingNumber > 0)
-                pixel->d[0] = pixel->d[1] = pixel->d[2] = 0;
+                pixel->d[0] = pixel->d[1] = pixel->d[2] = 150;
             else
-                pixel->d[0] = pixel->d[1] = pixel->d[2] = 255;
-#else
-            float distance = std::abs(ttftk::EvalDistance(&_glyph, sampleX, sampleY));
-            if (distance < 1.f)
-                pixel->d[0] = pixel->d[1] = pixel->d[2] = 0;
-            else
-                pixel->d[0] = pixel->d[1] = pixel->d[2] =
-                    (uint8_t)(std::min(distance * 0.1f, 1.f) * 255.f);
-#endif
+            {
+                float distance = ttftk::EvalDistance(&_glyph, sampleX, sampleY);
+                if (distance < 20.f)
+                    pixel->d[0] = pixel->d[1] = pixel->d[2] = 0;
+                else
+                    pixel->d[0] = pixel->d[1] = pixel->d[2] = 255;
+            }
         }
     }
 }
