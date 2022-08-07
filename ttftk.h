@@ -80,7 +80,7 @@ Result LoadTTF(uint8_t const* _memory, TrueTypeFile* _ttfFile);
 Result ReadGlyphData(TrueTypeFile const& _ttfFile, uint32_t _characterCode, Glyph* _glyph);
 std::vector<uint32_t> ListCharCodes(TrueTypeFile const& _ttfFile);
 
-int32_t EvalWindingNumber(Glyph const* _glyph, int16_t _sampleX, int16_t _sampleY);
+int32_t EvalWindingNumber(Glyph const* _glyph, int16_t _sampleX, int16_t _sampleY, float* _distance);
 float EvalDistance(Glyph const* _glyph, int16_t _sampleX, int16_t _sampleY);
 
 template <typename T>
@@ -517,8 +517,10 @@ std::vector<uint32_t> ListCharCodes(TrueTypeFile const& _ttfFile)
     return output;
 }
 
-int32_t EvalWindingNumber(Glyph const* _glyph, int16_t _sampleX, int16_t _sampleY)
+int32_t EvalWindingNumber(Glyph const* _glyph, int16_t _sampleX, int16_t _sampleY, float* _coverage)
 {
+    float coverage = std::numeric_limits<float>::infinity();
+
     int32_t windingNumber = 0;
     for (ttftk::GlyphContour const& contour : _glyph->contours)
     {
@@ -535,13 +537,27 @@ int32_t EvalWindingNumber(Glyph const* _glyph, int16_t _sampleX, int16_t _sample
                 (int16_t)(contour.y[point + 2] - _sampleY)
             };
 
-            float cx0 = -1.f;
-            float cx1 = -1.f;
+            float cx0 = -std::numeric_limits<float>::infinity();
+            float cx1 = -std::numeric_limits<float>::infinity();
             uint16_t hit = IntersectSpline(pointX, pointY, &cx0, &cx1);
             if (hit & 1 && cx0 >= 0.f) ++windingNumber;
             if (hit & 2 && cx1 >= 0.f) --windingNumber;
+
+            if (_coverage)
+            {
+                float cy0 = -std::numeric_limits<float>::infinity();
+                float cy1 = -std::numeric_limits<float>::infinity();
+                IntersectSpline(pointY, pointX, &cy0, &cy1);
+                float minx = (std::abs(cx0) < std::abs(cx1)) ? cx0 : cx1;
+                float miny = (std::abs(cy0) < std::abs(cy1)) ? cy0 : cy1;
+                float minv = (std::abs(minx) < std::abs(miny)) ? minx : miny;
+                coverage = (std::abs(coverage) < std::abs(minv)) ? coverage : minv;
+            }
         }
     }
+
+    if (_coverage)
+        *_coverage = coverage;
 
     return windingNumber;
 }
@@ -616,7 +632,6 @@ float sdBezier(int16_t const pointX[3], int16_t const pointY[3])
 float EvalDistance(Glyph const* _glyph, int16_t _sampleX, int16_t _sampleY)
 {
     float distance = std::numeric_limits<float>::infinity();
-    int32_t windingNumber = 0;
 
     for (ttftk::GlyphContour const& contour : _glyph->contours)
     {
@@ -637,7 +652,7 @@ float EvalDistance(Glyph const* _glyph, int16_t _sampleX, int16_t _sampleY)
         }
     }
 
-    return distance * ((windingNumber > 0) ? -1.f : 1.f);
+    return distance;
 }
 
 void const* ExtractOffsetSubtable(void const* _ptr, OffsetSubtable& _output)

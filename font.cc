@@ -36,7 +36,8 @@ void WriteFile(char const* _path, uint8_t const* _base, uint32_t _size)
 void RenderGlyph(ttftk::TrueTypeFile const& _ttfFile, ttftk::Glyph const& _glyph);
 void RenderGlyph(ttftk::TrueTypeFile const& _ttfFile, ttftk::Glyph const& _glyph,
                  bmptk::BitmapV1Header const& _header, bmptk::PixelValue *_pixels,
-                 uint32_t xres, uint32_t yres, uint32_t xOffset, uint32_t yOffset);
+                 uint32_t xres, uint32_t yres, uint32_t xOffset, uint32_t yOffset,
+                 uint32_t samplingRate, float pixelSize, bool subPixelEval);
 
 int main(int argc, char const ** argv)
 {
@@ -89,19 +90,37 @@ int main(int argc, char const ** argv)
     }
     else
     {
-        uint32_t charListOffset = 0u;
-        if (argc > 5)
-            charListOffset = std::strtol(argv[5], nullptr, 10);
+        uint32_t const ppem = (argc > 5)
+            ? std::strtol(argv[5], nullptr, 10)
+            : 12;
 
-        uint32_t boxsize = 75;
+        uint32_t const samplingRate = (argc > 6)
+            ? std::strtol(argv[6], nullptr, 10)
+            : 0u;
+
+        uint32_t const subPixelEval = (argc > 7)
+            ? std::strtol(argv[7], nullptr, 10)
+            : 0u;
+
+        uint32_t const charListOffset = (argc > 8)
+            ? std::strtol(argv[8], nullptr, 10)
+            : 0u;
+
+
+        float const xtoemRatio = (float)(ttfFile.xmax - ttfFile.xmin) / (float)ttfFile.emsize;
+        float const ytoemRatio = (float)(ttfFile.ymax - ttfFile.ymin) / (float)ttfFile.emsize;
+        uint32_t const gridSizeX = (uint32_t)std::round(xtoemRatio * (float)ppem);
+        uint32_t const gridSizeY = (uint32_t)std::round(ytoemRatio * (float)ppem);
+        float const pixelSize = (float)ttfFile.emsize / (float)ppem;
 
         bmptk::BitmapV1Header header{};
-        header.width = boxsize * glyphCountX;
-        header.height = -boxsize * glyphCountY;
+        header.width = gridSizeX * glyphCountX;
+        header.height = -gridSizeY * glyphCountY;
 
-        std::vector<bmptk::PixelValue> pixels(boxsize*boxsize * glyphCountX * glyphCountY);
+        std::vector<bmptk::PixelValue> pixels(std::abs(header.width * header.height));
         std::memset(pixels.data(), 0, sizeof(bmptk::PixelValue)*pixels.size());
         std::vector<uint32_t> charList = ttftk::ListCharCodes(ttfFile);
+        bmptk::PixelValue* const pixelBuffer = pixels.data();
 
         uint32_t glyphX = 0;
         uint32_t glyphY = 0;
@@ -109,8 +128,10 @@ int main(int argc, char const ** argv)
         {
             uint32_t charCode = charList[index + charListOffset];
             ttftk::ReadGlyphData(ttfFile, charCode, &glyph);
-            RenderGlyph(ttfFile, glyph, header, pixels.data(),
-                        boxsize, boxsize, glyphX * boxsize, glyphY * boxsize);
+            RenderGlyph(ttfFile, glyph, header, pixelBuffer,
+                        gridSizeX, gridSizeY, glyphX * gridSizeX, glyphY * gridSizeY,
+                        samplingRate, pixelSize, !!subPixelEval);
+
             ++glyphX;
             if (glyphX >= glyphCountX)
             {
@@ -172,7 +193,7 @@ void RenderGlyph(ttftk::TrueTypeFile const& _ttfFile, ttftk::Glyph const& _glyph
             int16_t sampleX = (int16_t)std::round(u * (sourceMaxX - sourceMinX) + sourceMinX);
             int16_t sampleY = (int16_t)std::round(v * (sourceMaxY - sourceMinY) + sourceMinY);
 
-            int32_t windingNumber = ttftk::EvalWindingNumber(&_glyph, sampleX, sampleY);
+            int32_t windingNumber = ttftk::EvalWindingNumber(&_glyph, sampleX, sampleY, nullptr);
 
 #if 1
             if (windingNumber > 0)
@@ -193,15 +214,16 @@ void RenderGlyph(ttftk::TrueTypeFile const& _ttfFile, ttftk::Glyph const& _glyph
 
 void RenderGlyph(ttftk::TrueTypeFile const& _ttfFile, ttftk::Glyph const& _glyph,
                  bmptk::BitmapV1Header const& _header, bmptk::PixelValue *_pixels,
-                 uint32_t xres, uint32_t yres, uint32_t xOffset, uint32_t yOffset)
+                 uint32_t xres, uint32_t yres, uint32_t xOffset, uint32_t yOffset,
+                 uint32_t samplingRate, float pixelSize, bool subPixelEval)
 {
-    int maxX = (int)xres;
-    int maxY = (int)yres;
+    int const maxX = (int)xres;
+    int const maxY = (int)yres;
 
-    float sourceMaxX = (float)_ttfFile.xmax;
-    float sourceMinX = (float)_ttfFile.xmin;
-    float sourceMaxY = (float)_ttfFile.ymax;
-    float sourceMinY = (float)_ttfFile.ymin;
+    float const sourceMaxX = (float)_ttfFile.xmax;
+    float const sourceMinX = (float)_ttfFile.xmin;
+    float const sourceMaxY = (float)_ttfFile.ymax;
+    float const sourceMinY = (float)_ttfFile.ymin;
 
     float yaspect = 1.f;
     float xaspect = (sourceMaxX - sourceMinX) / (sourceMaxY - sourceMinY);
@@ -211,29 +233,60 @@ void RenderGlyph(ttftk::TrueTypeFile const& _ttfFile, ttftk::Glyph const& _glyph
         xaspect = 1.f;
     }
 
+    float const ssMaxX = (float)(maxX << samplingRate);
+    float const ssMaxY = (float)(maxY << samplingRate);
+    pixelSize /= (float)(1 << samplingRate);
+
     for (int y = 0; y < maxY; ++y)
     {
         for (int x = 0; x < maxX; ++x)
         {
-            float u = ((float)x / (float)maxX) / xaspect;
-            float v = ((float)(maxY-y) / (float)maxY) / yaspect;
+            float accum = 0.f;
+            uint32_t sampleCount = (1 << (samplingRate*2));
+            for (uint32_t s = 0; s < sampleCount; ++s)
+            {
+                int sx = s & ((1 << samplingRate) - 1);
+                int sy = (s & (((1 << samplingRate) - 1) << samplingRate)) >> samplingRate;
 
-            int16_t sampleX = (int16_t)std::round(u * (sourceMaxX - sourceMinX) + sourceMinX);
-            int16_t sampleY = (int16_t)std::round(v * (sourceMaxY - sourceMinY) + sourceMinY);
+                float u = (((float)((x << samplingRate) + sx) + 0.5f) / ssMaxX) / xaspect;
+                float v = (1.f - ((float)((y << samplingRate) + sy) + 0.5f) / ssMaxY) / yaspect;
+
+                int16_t sampleX = (int16_t)std::round(u * (sourceMaxX - sourceMinX) + sourceMinX);
+                int16_t sampleY = (int16_t)std::round(v * (sourceMaxY - sourceMinY) + sourceMinY);
+
+                float coverage = 0.f;
+                float distance = pixelSize*0.5f;
+                int32_t windingNumber =
+                    ttftk::EvalWindingNumber(&_glyph, sampleX, sampleY,
+                                             (subPixelEval ? &distance : nullptr));
+
+                if (windingNumber > 0)
+                    coverage = 1.f-std::max(0.5f-(std::abs(distance)/pixelSize), 0.f);
+                else if (std::abs(distance) < pixelSize*0.5f)
+                    coverage = std::max(0.5f-(std::abs(distance) / pixelSize), 0.f);
+
+                accum += (255.f * coverage) / sampleCount;
+
+#if 0
+                if (windingNumber > 0)
+                    accum += 255.f / sampleCount;
+#if 0
+                else
+                {
+                    float distance = ttftk::EvalDistance(&_glyph, sampleX, sampleY);
+                    if (distance < 300.f)
+                        accum += 0.f / sampleCount;
+                    else
+                        accum += 0.f / sampleCount;
+                }
+#else
+                else accum += 0.f / sampleCount;
+#endif
+#endif
+            }
 
             bmptk::PixelValue* pixel = _pixels + ((xOffset + x) + (yOffset + y)*_header.width);
-
-            int32_t windingNumber = ttftk::EvalWindingNumber(&_glyph, sampleX, sampleY);
-            if (windingNumber > 0)
-                pixel->d[0] = pixel->d[1] = pixel->d[2] = 150;
-            else
-            {
-                float distance = ttftk::EvalDistance(&_glyph, sampleX, sampleY);
-                if (distance < 20.f)
-                    pixel->d[0] = pixel->d[1] = pixel->d[2] = 0;
-                else
-                    pixel->d[0] = pixel->d[1] = pixel->d[2] = 255;
-            }
+            pixel->d[0] = pixel->d[1] = pixel->d[2] = (float)std::round(accum);
         }
     }
 }
